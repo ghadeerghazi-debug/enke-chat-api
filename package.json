@@ -1,0 +1,6 @@
+{
+  "name": "enke-chat-api",
+  "private": true,
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node server.js" }
+}
