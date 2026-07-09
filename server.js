@@ -63,6 +63,23 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { ...cors, 'content-type': 'text/plain' });
     return res.end('ok');
   }
+  if (req.method === 'POST' && TG_TOKEN && TG_SECRET &&
+      req.url === `/telegram/${TG_SECRET}`) {
+    let body = '';
+    req.on('data', (d) => {
+      body += d;
+      if (body.length > 100_000) req.destroy();
+    });
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}'); // ack fast; Telegram retries otherwise
+      try {
+        handleTelegramUpdate(JSON.parse(body || '{}'));
+      } catch (_) {}
+    });
+    return;
+  }
+
   if (req.method !== 'POST' || req.url !== '/api/chat') {
     res.writeHead(404, { ...cors, 'content-type': 'text/plain' });
     return res.end('not found');
@@ -139,3 +156,131 @@ const server = http.createServer((req, res) => {
 server.listen(process.env.PORT || 10000, () => {
   console.log('enke-chat-api listening on', process.env.PORT || 10000);
 });
+
+
+// ═══════════════════ Telegram bot (same brain as the app) ═══════════════════
+// Set TELEGRAM_BOT_TOKEN (from @BotFather) and TELEGRAM_WEBHOOK_SECRET in
+// Render env vars, then register the webhook:
+//   https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://enke-chat-api.onrender.com/telegram/<SECRET>
+
+const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const TG_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || '';
+const TG_API = () => `https://api.telegram.org/bot${TG_TOKEN}`;
+
+// Per-chat rolling history (in-memory; resets when the service sleeps).
+const tgHistory = new Map();
+function historyFor(chatId) {
+  if (!tgHistory.has(chatId)) tgHistory.set(chatId, []);
+  if (tgHistory.size > 2000) tgHistory.clear(); // memory guard
+  return tgHistory.get(chatId);
+}
+
+const TG_WELCOME =
+  'مرحباً! أنا <b>مساعد إنكي الذكي</b> 🏛\n' +
+  'اسألني عن فكر ومسيرة آل الحكيم — وخاصة سماحة السيد عمار الحكيم — ' +
+  'وعن إصدارات مؤسسة إنكي للدراسات والبحوث ودراساتها ومجلتها وجائزة الحكيم.\n\n' +
+  'أوامر:\n/new — محادثة جديدة\n/help — المساعدة\n\n' +
+  'جرّب: <i>ما أبرز أفكار السيد عمار الحكيم؟</i>';
+
+function tgHtml(text) {
+  // Claude markdown → Telegram HTML (safe subset).
+  let out = text
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  out = out.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  out = out.replace(/^#{1,4}\s+(.+)$/gm, '<b>$1</b>');
+  out = out.replace(/^\s*[-*]\s+/gm, '• ');
+  return out;
+}
+
+async function tgCall(method, payload) {
+  try {
+    const r = await fetch(`${TG_API()}/${method}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return await r.json();
+  } catch (e) {
+    console.error('tg error', method, e.message);
+    return null;
+  }
+}
+
+async function tgSend(chatId, text) {
+  const html = tgHtml(text);
+  // Telegram hard limit 4096 chars — split on paragraph boundaries.
+  const chunks = [];
+  let rest = html;
+  while (rest.length > 3900) {
+    let cut = rest.lastIndexOf('\n', 3900);
+    if (cut < 1000) cut = 3900;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
+  }
+  chunks.push(rest);
+  for (const c of chunks) {
+    const ok = await tgCall('sendMessage',
+        { chat_id: chatId, text: c, parse_mode: 'HTML' });
+    if (!ok || !ok.ok) {
+      await tgCall('sendMessage', { chat_id: chatId, text: c }); // plain fallback
+    }
+  }
+}
+
+async function claudeOnce(messages) {
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': KEY,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: 1400,
+      system: SYSTEM +
+        '\n\nأنت الآن تجيب عبر بوت تيليجرام: أجب بإيجاز ووضوح، ' +
+        'واستخدم **التعميق** والنقاط عند الحاجة.',
+      messages,
+    }),
+  });
+  const data = await r.json();
+  if (data.type === 'error') throw new Error(data.error?.message || 'api error');
+  return (data.content || [])
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('');
+}
+
+async function handleTelegramUpdate(update) {
+  const msg = update.message || update.edited_message;
+  if (!msg || !msg.text || !msg.chat) return;
+  const chatId = msg.chat.id;
+  const text = msg.text.trim();
+
+  if (text === '/start' || text === '/help') {
+    tgHistory.delete(chatId);
+    return tgSend(chatId, TG_WELCOME);
+  }
+  if (text === '/new' || text === '/clear') {
+    tgHistory.delete(chatId);
+    return tgSend(chatId, 'بدأنا محادثة جديدة ✨ تفضل بسؤالك.');
+  }
+
+  const history = historyFor(chatId);
+  history.push({ role: 'user', content: text.slice(0, 4000) });
+  while (history.length > 12) history.shift();
+  if (history[0] && history[0].role !== 'user') history.shift();
+
+  tgCall('sendChatAction', { chat_id: chatId, action: 'typing' });
+  try {
+    const reply = await claudeOnce([...history]);
+    history.push({ role: 'assistant', content: reply });
+    await tgSend(chatId, reply ||
+        'عذراً، لم أتمكن من توليد إجابة. حاول مرة أخرى.');
+  } catch (e) {
+    console.error('claude error', e.message);
+    await tgSend(chatId,
+        'عذراً، تعذر الوصول إلى المساعد حالياً. حاول بعد قليل 🙏');
+  }
+}
