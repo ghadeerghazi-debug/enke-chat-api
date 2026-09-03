@@ -8,6 +8,41 @@ const http = require('http');
 const KEY = process.env.ANTHROPIC_API_KEY || '';
 const MODEL = 'claude-opus-4-8';
 
+// Knowledge base (PythonAnywhere FTS5 index of the al-Hakim encyclopedia).
+const KB_URL = process.env.KB_URL || '';
+const KB_TOKEN = process.env.KB_TOKEN || '';
+
+async function kbSearch(query) {
+  if (!KB_URL || !KB_TOKEN || !query) return [];
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 4000);
+    const r = await fetch(
+      `${KB_URL}/search?q=${encodeURIComponent(query.slice(0, 400))}&k=6`,
+      { headers: { 'X-KB-Token': KB_TOKEN }, signal: ctl.signal });
+    clearTimeout(t);
+    if (!r.ok) return [];
+    const data = await r.json();
+    return Array.isArray(data.results) ? data.results : [];
+  } catch (_) {
+    return []; // KB is best-effort; never block the chat on it
+  }
+}
+
+function kbContext(results) {
+  if (!results.length) return '';
+  let out = '\n\nمقتطفات ذات صلة من موسوعة «خطاب الاعتدال والبناء» (كلمات وخطب السيد عمار الحكيم 2009–2021). ' +
+    'استند إليها في إجابتك عند الصلة، واذكر اسم المجلد عند الاقتباس. ' +
+    'المجلدات الموسومة بـ«غير دقيق» نصوصها ممسوحة ضوئياً بدقة أقل فتعامل معها بحذر:\n';
+  let used = 0;
+  for (const r of results) {
+    const t = `\n【${r.vol}】\n${String(r.text || '').slice(0, 900)}\n`;
+    if (used + t.length > 5000) break;
+    out += t; used += t.length;
+  }
+  return out;
+}
+
 // Only the ENKE web app (and local dev) may call this proxy.
 const ALLOWED_ORIGINS = new Set([
   'https://enke-web-lezm.onrender.com',
@@ -109,7 +144,8 @@ const server = http.createServer((req, res) => {
       }));
       if (msgs[msgs.length - 1].role !== 'user') throw new Error('last message must be user');
 
-      let system = SYSTEM +
+      const kb = await kbSearch(msgs[msgs.length - 1].content);
+      let system = SYSTEM + kbContext(kb) +
         (style === 'detailed'
           ? '\n\nأجب بتفصيلٍ وافٍ مع عناوين ونقاط عند الحاجة.'
           : '\n\nأجب بإيجاز ووضوح — فقرة أو نقاط قليلة تكفي.');
@@ -228,7 +264,7 @@ async function tgSend(chatId, text) {
   }
 }
 
-async function claudeOnce(messages) {
+async function claudeOnce(messages, kbText = '') {
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -239,7 +275,7 @@ async function claudeOnce(messages) {
     body: JSON.stringify({
       model: MODEL,
       max_tokens: 1400,
-      system: SYSTEM +
+      system: SYSTEM + kbText +
         '\n\nأنت الآن تجيب عبر بوت تيليجرام: أجب بإيجاز ووضوح، ' +
         'واستخدم **التعميق** والنقاط عند الحاجة.',
       messages,
@@ -275,7 +311,8 @@ async function handleTelegramUpdate(update) {
 
   tgCall('sendChatAction', { chat_id: chatId, action: 'typing' });
   try {
-    const reply = await claudeOnce([...history]);
+    const kb = await kbSearch(text);
+    const reply = await claudeOnce([...history], kbContext(kb));
     history.push({ role: 'assistant', content: reply });
     await tgSend(chatId, reply ||
         'عذراً، لم أتمكن من توليد إجابة. حاول مرة أخرى.');
