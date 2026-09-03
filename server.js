@@ -6,7 +6,7 @@
 const http = require('http');
 
 const KEY = process.env.ANTHROPIC_API_KEY || '';
-const MODEL = 'claude-opus-4-8';
+const MODEL = 'claude-sonnet-5';
 
 // Knowledge base (PythonAnywhere FTS5 index of the al-Hakim encyclopedia).
 const KB_URL = process.env.KB_URL || '';
