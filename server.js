@@ -10,6 +10,7 @@ const MODEL = 'claude-opus-4-8';
 
 // Only the ENKE web app (and local dev) may call this proxy.
 const ALLOWED_ORIGINS = new Set([
+  'https://enke-web-lezm.onrender.com',
   'https://enke-web.onrender.com',
   'http://localhost:8807',
   'http://localhost:5000',
@@ -43,7 +44,7 @@ const SYSTEM = `أنت "مساعد إنكي" — المساعد الذكي ال�
 - أجب فقط ضمن نطاق عمل المؤسسة وموضوعاتها؛ اعتذر بلطف عن الطلبات الخارجة عن ذلك تماماً.`;
 
 function corsHeaders(origin) {
-  const allow = ALLOWED_ORIGINS.has(origin) ? origin : 'https://enke-web.onrender.com';
+  const allow = ALLOWED_ORIGINS.has(origin) ? origin : 'https://enke-web-lezm.onrender.com';
   return {
     'Access-Control-Allow-Origin': allow,
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
