@@ -341,7 +341,6 @@ async function claudeOnce(messages, kbText = '') {
     body: JSON.stringify({
       model: MODEL,
       max_tokens: 4000,
-      thinking: { type: 'enabled', budget_tokens: 2000 },
       system: SYSTEM + QUALITY + kbText +
         '\n\nأنت الآن تجيب عبر بوت تيليجرام: أجب بإيجاز ووضوح، ' +
         'واستخدم **التعميق** والنقاط عند الحاجة.',
