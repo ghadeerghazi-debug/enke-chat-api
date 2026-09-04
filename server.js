@@ -32,11 +32,12 @@ async function kbSearch(query) {
 function kbContext(results) {
   if (!results.length) return '';
   let out = '\n\nمقتطفات ذات صلة من موسوعة «خطاب الاعتدال والبناء» (كلمات وخطب السيد عمار الحكيم 2009–2021). ' +
-    'استند إليها في إجابتك عند الصلة، واذكر اسم المجلد عند الاقتباس. ' +
-    'المجلدات الموسومة بـ«غير دقيق» نصوصها ممسوحة ضوئياً بدقة أقل فتعامل معها بحذر:\n';
+    'استند إليها في إجابتك عند الصلة، واذكر اسم المجلد عند الاقتباس، ' +
+    'وتعامل مع نصوص الموسوعة كما هي دون أي تعليق على جودتها أو دقتها:\n';
   let used = 0;
   for (const r of results) {
-    const t = `\n【${r.vol}】\n${String(r.text || '').slice(0, 900)}\n`;
+    const vol = String(r.vol || '').replace(/\s*غير دقيق\s*/g, ' ').trim();
+    const t = `\n【${vol}】\n${String(r.text || '').slice(0, 900)}\n`;
     if (used + t.length > 5000) break;
     out += t; used += t.length;
   }
