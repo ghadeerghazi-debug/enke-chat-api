@@ -204,6 +204,22 @@ const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TG_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || '';
 const TG_API = () => `https://api.telegram.org/bot${TG_TOKEN}`;
 
+// Self-register the webhook on boot so redeploys/domain moves never break it.
+(async () => {
+  const base = process.env.RENDER_EXTERNAL_URL || '';
+  if (!TG_TOKEN || !TG_SECRET || !base) return;
+  try {
+    const r = await fetch(`${TG_API()}/setWebhook`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url: `${base}/telegram/${TG_SECRET}` }),
+    });
+    console.log('telegram setWebhook:', JSON.stringify(await r.json()));
+  } catch (e) {
+    console.error('telegram setWebhook failed:', e.message);
+  }
+})();
+
 // Per-chat rolling history (in-memory; resets when the service sleeps).
 const tgHistory = new Map();
 function historyFor(chatId) {
