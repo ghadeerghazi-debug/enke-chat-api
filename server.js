@@ -12,13 +12,13 @@ const MODEL = 'claude-sonnet-5';
 const KB_URL = process.env.KB_URL || '';
 const KB_TOKEN = process.env.KB_TOKEN || '';
 
-async function kbSearch(query) {
+async function kbSearch(query, kb = 'encyclopedia', k = 6) {
   if (!KB_URL || !KB_TOKEN || !query) return [];
   try {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), 4000);
     const r = await fetch(
-      `${KB_URL}/search?q=${encodeURIComponent(query.slice(0, 400))}&k=6`,
+      `${KB_URL}/search?kb=${kb}&q=${encodeURIComponent(query.slice(0, 400))}&k=${k}`,
       { headers: { 'X-KB-Token': KB_TOKEN }, signal: ctl.signal });
     clearTimeout(t);
     if (!r.ok) return [];
@@ -29,8 +29,47 @@ async function kbSearch(query) {
   }
 }
 
+// ---- intent routing: encyclopedia research vs foundation/app help ----
+const AR_DIAC = /[\u064B-\u0652\u0670\u0640]/g;
+function arNorm(t) {
+  return String(t || '').replace(AR_DIAC, '')
+    .replace(/[أإآ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه')
+    .replace(/ؤ/g, 'و').replace(/ئ/g, 'ي');
+}
+const ENC_SIGNALS = [['قال',2],['خطاب',2],['كلمه',2],['موقف',2],['راي',2],
+  ['تحدث',2],['موسوعه',3],['محاضره',2],['اقتباس',2],['فكر',1],
+  ['عمار',1],['سماحه',2],['عبد العزيز',2],['ال الحكيم',2]];
+const HELP_SIGNALS = [['جايزه',3],['جائزه',3],['تقديم',2],['شروط',2],['موعد',2],
+  ['مواعيد',2],['مجله',2],['نشر',1],['تطبيق',3],['كتاب',1],['اصدار',2],
+  ['تواصل',2],['بريد',2],['هاتف',2],['مؤسسه',2],['اقسام',2],['مساعد',1],
+  ['كيف',1],['اين',1],['استلال',2],['تحكيم',1],['محاور',2]];
+function routeIntent(query, mode) {
+  if (mode === 'help') return ['faq'];
+  if (mode === 'research') return ['encyclopedia'];
+  const q = arNorm(query);
+  const score = (sig) => sig.reduce((a, [w, v]) => a + (q.includes(w) ? v : 0), 0);
+  const enc = score(ENC_SIGNALS), help = score(HELP_SIGNALS);
+  if (help > enc && help > 0) return ['faq'];
+  if (enc > help && enc > 0) return ['encyclopedia'];
+  return ['encyclopedia', 'faq']; // ambiguous: give Claude both, it picks
+}
+async function retrieve(query, mode) {
+  const kbs = routeIntent(query, mode);
+  const out = {};
+  await Promise.all(kbs.map(async (kb) =>
+    { out[kb] = await kbSearch(query, kb, kb === 'faq' ? 4 : 6); }));
+  return out;
+}
+function faqContext(results) {
+  if (!results || !results.length) return '';
+  let out = '\n\nمعلومات من دليل مؤسسة إنكي والتطبيق — أجب منها إجابة عملية مباشرة ' +
+    'دون الاستشهاد بالموسوعة ودون ذكر مجلدات:\n';
+  for (const r of results) out += `\n• ${r.topic}: ${String(r.text || '').slice(0, 800)}\n`;
+  return out;
+}
+
 function kbContext(results) {
-  if (!results.length) return '';
+  if (!results || !results.length) return '';
   let out = '\n\nمقتطفات ذات صلة من موسوعة «خطاب الاعتدال والبناء» (كلمات وخطب السيد عمار الحكيم 2009–2021). ' +
     'استند إليها في إجابتك عند الصلة، واذكر اسم المجلد عند الاقتباس، ' +
     'وتعامل مع نصوص الموسوعة كما هي دون أي تعليق على جودتها أو دقتها:\n';
@@ -135,7 +174,7 @@ const server = http.createServer((req, res) => {
   });
   req.on('end', async () => {
     try {
-      const { messages = [], doc, style } = JSON.parse(body || '{}');
+      const { messages = [], doc, style, mode } = JSON.parse(body || '{}');
       if (!Array.isArray(messages) || messages.length === 0) {
         throw new Error('messages required');
       }
@@ -145,8 +184,8 @@ const server = http.createServer((req, res) => {
       }));
       if (msgs[msgs.length - 1].role !== 'user') throw new Error('last message must be user');
 
-      const kb = await kbSearch(msgs[msgs.length - 1].content);
-      let system = SYSTEM + kbContext(kb) +
+      const found = await retrieve(msgs[msgs.length - 1].content, mode);
+      let system = SYSTEM + kbContext(found.encyclopedia) + faqContext(found.faq) +
         (style === 'detailed'
           ? '\n\nأجب بتفصيلٍ وافٍ مع عناوين ونقاط عند الحاجة.'
           : '\n\nأجب بإيجاز ووضوح — فقرة أو نقاط قليلة تكفي.');
@@ -328,8 +367,9 @@ async function handleTelegramUpdate(update) {
 
   tgCall('sendChatAction', { chat_id: chatId, action: 'typing' });
   try {
-    const kb = await kbSearch(text);
-    const reply = await claudeOnce([...history], kbContext(kb));
+    const found = await retrieve(text);
+    const reply = await claudeOnce([...history],
+        kbContext(found.encyclopedia) + faqContext(found.faq));
     history.push({ role: 'assistant', content: reply });
     await tgSend(chatId, reply ||
         'عذراً، لم أتمكن من توليد إجابة. حاول مرة أخرى.');
