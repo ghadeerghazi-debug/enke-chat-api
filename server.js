@@ -12,7 +12,7 @@ const MODEL = 'claude-sonnet-5';
 const KB_URL = process.env.KB_URL || '';
 const KB_TOKEN = process.env.KB_TOKEN || '';
 
-async function kbSearch(query, kb = 'encyclopedia', k = 6) {
+async function kbSearch(query, kb = 'encyclopedia', k = 8) {
   if (!KB_URL || !KB_TOKEN || !query) return [];
   try {
     const ctl = new AbortController();
@@ -57,7 +57,7 @@ async function retrieve(query, mode) {
   const kbs = routeIntent(query, mode);
   const out = {};
   await Promise.all(kbs.map(async (kb) =>
-    { out[kb] = await kbSearch(query, kb, kb === 'faq' ? 4 : 6); }));
+    { out[kb] = await kbSearch(query, kb, kb === 'faq' ? 4 : 8); }));
   return out;
 }
 function faqContext(results) {
@@ -76,8 +76,8 @@ function kbContext(results) {
   let used = 0;
   for (const r of results) {
     const vol = String(r.vol || '').replace(/\s*غير دقيق\s*/g, ' ').trim();
-    const t = `\n【${vol}】\n${String(r.text || '').slice(0, 900)}\n`;
-    if (used + t.length > 5000) break;
+    const t = `\n【${vol}】\n${String(r.text || '').slice(0, 1100)}\n`;
+    if (used + t.length > 9000) break;
     out += t; used += t.length;
   }
   return out;
@@ -117,6 +117,13 @@ const SYSTEM = `أنت "مساعد إنكي" — المساعد الذكي ال�
 - قاعدة معرفة الكتب الكاملة قيد الربط؛ إن سُئلت عن تفاصيل نصية دقيقة من داخل كتاب ليست لديك، قل ذلك بصراحة وأرشد السائل إلى الكتاب المناسب.
 - أسلوبك مهذب ورصين يليق بمؤسسة بحثية.
 - أجب فقط ضمن نطاق عمل المؤسسة وموضوعاتها؛ اعتذر بلطف عن الطلبات الخارجة عن ذلك تماماً.`;
+
+const QUALITY = '\n\nقواعد جودة الإجابة:\n' +
+  '- عند السؤال عن فكر سماحة السيد أو مواقفه: اجمع بين المقتطفات المتاحة كلها ورَكِّب منها إجابة واحدة متماسكة، لا تلخيصًا لمقتطف واحد.\n' +
+  '- اقتبس عباراته الأصلية نصًا بين علامتي «» عندما تتوفر، واذكر المجلد والسنة بعد كل اقتباس.\n' +
+  '- رتِّب الإجابة الطويلة بعناوين أو نقاط، وابدأ بخلاصة من سطر واحد.\n' +
+  '- إن كانت المقتطفات لا تغطي السؤال تمامًا، قدِّم أقرب ما تغطيه منها بوضوح ثم اقترح صياغة أدق للسؤال — لا تكتفِ بالاعتذار.\n' +
+  '- في أسئلة المتابعة، اربط إجابتك بما سبق في المحادثة.';
 
 function corsHeaders(origin) {
   const allow = ALLOWED_ORIGINS.has(origin) ? origin : 'https://enke-web-lezm.onrender.com';
@@ -184,8 +191,11 @@ const server = http.createServer((req, res) => {
       }));
       if (msgs[msgs.length - 1].role !== 'user') throw new Error('last message must be user');
 
-      const found = await retrieve(msgs[msgs.length - 1].content, mode);
-      let system = SYSTEM + kbContext(found.encyclopedia) + faqContext(found.faq) +
+      const prevUser = msgs.filter((m) => m.role === 'user').slice(-2, -1);
+      const rq = (prevUser.length ? prevUser[0].content + ' ' : '') +
+        msgs[msgs.length - 1].content;
+      const found = await retrieve(rq, mode);
+      let system = SYSTEM + QUALITY + kbContext(found.encyclopedia) + faqContext(found.faq) +
         (style === 'detailed'
           ? '\n\nأجب بتفصيلٍ وافٍ مع عناوين ونقاط عند الحاجة.'
           : '\n\nأجب بإيجاز ووضوح — فقرة أو نقاط قليلة تكفي.');
@@ -204,7 +214,7 @@ const server = http.createServer((req, res) => {
         },
         body: JSON.stringify({
           model: MODEL,
-          max_tokens: 2048,
+          max_tokens: 3000,
           stream: true,
           system,
           messages: msgs,
@@ -330,8 +340,9 @@ async function claudeOnce(messages, kbText = '') {
     },
     body: JSON.stringify({
       model: MODEL,
-      max_tokens: 1400,
-      system: SYSTEM + kbText +
+      max_tokens: 4000,
+      thinking: { type: 'enabled', budget_tokens: 2000 },
+      system: SYSTEM + QUALITY + kbText +
         '\n\nأنت الآن تجيب عبر بوت تيليجرام: أجب بإيجاز ووضوح، ' +
         'واستخدم **التعميق** والنقاط عند الحاجة.',
       messages,
@@ -367,7 +378,8 @@ async function handleTelegramUpdate(update) {
 
   tgCall('sendChatAction', { chat_id: chatId, action: 'typing' });
   try {
-    const found = await retrieve(text);
+    const prevU = history.filter((m) => m.role === 'user').slice(-2, -1);
+    const found = await retrieve((prevU.length ? prevU[0].content + ' ' : '') + text);
     const reply = await claudeOnce([...history],
         kbContext(found.encyclopedia) + faqContext(found.faq));
     history.push({ role: 'assistant', content: reply });
